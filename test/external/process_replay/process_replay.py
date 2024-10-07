@@ -105,20 +105,6 @@ def _pmap(row_count:int, fxn:Callable[[int], Union[bool, Tuple[int, int]]], maxt
 
 # *** process replay parallel differ runners
 
-def process_replay_schedule() -> None:
-  conn = db_connection()
-  cur = conn.cursor()
-  try: has_diff = cur.execute(f"select name from sqlite_master where type='table' and name='schedule_diff_{VERSION}'").fetchone()
-  except sqlite3.OperationalError:
-    logging.warning(f"schedule_diff_{VERSION} isn't accessible in master, did DB_VERSION change?")
-    return
-  if has_diff:
-    row_count = cur.execute(f"select count(*) from 'schedule_diff_{VERSION}'").fetchone()[0]
-    if row_count != 0: logging.info("***** schedule diff")
-    conn.commit()
-    cur.close()
-    _pmap(row_count, diff_schedule)
-
 def process_replay_kernel() -> None:
   conn = db_connection()
   cur = conn.cursor()
@@ -136,13 +122,6 @@ if __name__ == "__main__":
   if SKIP_PROCESS_REPLAY:
     logging.info("skipping process replay.")
     exit(0)
-
-  if COMPARE_SCHEDULE:
-    logging.info("***** schedule diff")
-    try: process_replay_schedule()
-    except Exception as e:
-      if ASSERT_DIFF: raise e
-      logging.error(f"schedule diff err {e}")
 
   logging.info("***** kernel diff")
   try: process_replay_kernel()

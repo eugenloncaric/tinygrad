@@ -414,10 +414,6 @@ def _graph_schedule(outs:List[LazyBuffer]) -> \
 
 def create_schedule_with_vars(outs:List[LazyBuffer]) -> Tuple[List[ScheduleItem], Dict[Variable, int]]:
   graph, in_degree, var_vals = _graph_schedule(outs)
-  if getenv("RUN_PROCESS_REPLAY") and getenv("COMPARE_SCHEDULE", 1):
-    # NOTE: process relpay needs PYTHONPATH=., remove this once it just pickles LazyBuffers
-    with contextlib.suppress(Exception): importlib.import_module("test.external.process_replay.diff_schedule").process_replay(outs, graph, in_degree)
-
   queue = deque(lsi for lsi,deg in in_degree.items() if deg == 0)
   schedule: List[ScheduleItem] = []
   kernel_number = GlobalCounters.kernel_count
