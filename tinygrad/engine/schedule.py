@@ -135,27 +135,18 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
   tensor_map = graph_rewrite_map(sink, remove_movement_ops+sym)
   buffer_map = graph_rewrite_map(tensor_map[sink], remove_movement_ops+sym+bufferize, realizes)
 
-  # remap
-  rev_tensor_map: dict[UOp, list[UOp]] = {}
-  for k,v in tensor_map.items():
-    if v not in rev_tensor_map: rev_tensor_map[v] = []
-    rev_tensor_map[v].append(k)
-  tensor_buffers: dict[UOp, list[UOp]] = {}
-  for k,v in buffer_map.items():
-    if v.base.op is Ops.BUFFER:
-      if v.base not in tensor_buffers: tensor_buffers[v.base] = []
-      tensor_buffers[v.base].extend(rev_tensor_map[k])
-
   # schedule
   schedule: list[ScheduleItem] = []
-  becomes_map: dict[UOp, UOp] = {}
   for k,v in realizes.items():
     ast = graph_rewrite(v.sink(), debufferize+view_left, bufs:=[k])
     schedule.append(ScheduleItem(graph_rewrite(ast, to_si), tuple(b.buffer for b in bufs), ()))
-    # update buffer refs for unrealized tensors
     for b in bufs: b.buffer.ref(1)
-    tensor_refs = tensor_buffers[k]
-    for tr in tensor_refs:
-      if tr.base is k: continue # tensors that are assign targets are already realized
-      becomes_map[tr] = k.view(unwrap(tr.st))
+
+  # update tensor refs
+  becomes_map: dict[UOp, UOp] = {}
+  for k,v in tensor_map.items():
+    buf_ref = buffer_map.get(v)
+    if buf_ref is not None and buf_ref.base is not k.base and buf_ref.base.op is Ops.BUFFER:
+      becomes_map[k] = buf_ref.base.view(unwrap(k.st))
+
   return schedule, var_vals, becomes_map
