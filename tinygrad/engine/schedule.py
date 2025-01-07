@@ -1,9 +1,9 @@
 from dataclasses import dataclass
-from tinygrad.dtype import dtypes
+from tinygrad.dtype import ImageDType, dtypes
 from tinygrad.ops import UOp, Ops, GroupOp, Variable, PatternMatcher, UPat, type_verify, graph_rewrite, track_rewrites, identity_element
 from tinygrad.ops import merge_views, symbolic_simple, view_left, graph_rewrite_map
 from tinygrad.device import Buffer
-from tinygrad.helpers import Metadata, all_int, unwrap, prod
+from tinygrad.helpers import Metadata, DEBUG, all_int, unwrap, prod
 from tinygrad.shape.shapetracker import ShapeTracker
 
 # ** tensor uop spec
@@ -121,6 +121,23 @@ def unbind_var(ctx:dict[Variable, int], root:UOp):
 unbind_vars = PatternMatcher([
   (UPat(Ops.VIEW, name="root"), unbind_st_vars),
   (UPat(Ops.BIND, name="root"), unbind_var),
+  # TODO: for some reason bound sts should keep existing on const reduce even if they are unmasked
+  (UPat({Ops.CONST, Ops.DEFINE_VAR}, name="root", src=(UPat(),)), lambda root:root.replace(src=()) if all_int(root.shape) \
+      else UOp(Ops.VALID, dtypes.bool, (unwrap(root.st).to_uop(),)).where(root.replace(src=()), 0)),
+])
+
+# ** deal with ImageDType
+
+def can_image(root:UOp):
+  assert root is root.base, f"can only make things that can't be images not images in base {root}"
+  if not isinstance(dtype:=root.dtype, ImageDType) or root.st is None: return None
+  if (prod(root.shape) != prod(dtype.shape) or not any(root.shape[x]%4 == 0 for x in unwrap(root.st).unit_stride_axes())):
+    if DEBUG >= 2: print(f"forcing image {dtype} with shape {root.shape} to {dtype.base}")
+    return root.replace(dtype=root.dtype.base)
+
+image_pm = PatternMatcher([
+  # sometimes we make things that can't be images not images
+  (UPat(set(Ops)-{Ops.VIEW}, name="root"), can_image),
 ])
 
 # ** ast rewrite
@@ -147,8 +164,8 @@ to_si = PatternMatcher([
   (UPat(Ops.SINK, src=(UPat.store(UPat(), UPat(), UPat(GroupOp.Meta, name="meta")))), lambda meta:meta),
   (UPat(Ops.CONTIGUOUS, src=(UPat.var("x"),)), lambda x:x),
   (UPat(Ops.ASSIGN, src=(UPat(), UPat.var("x"),)), lambda x:x),
-  (UPat({Ops.CONST, Ops.DEFINE_VAR}, name="root", src=(UPat(),)), lambda root:root.replace(src=()) if all_int(root.shape) \
-      else UOp(Ops.VALID, dtypes.bool, (unwrap(root.st).to_uop(),)).where(root.replace(src=()), 0)),
+  # in general once things are loaded they aren't image
+  (UPat(set(Ops)-{Ops.DEFINE_GLOBAL}, name="root"), lambda root:root.replace(dtype=root.dtype.base) if isinstance(root.dtype, ImageDType) else None),
 ])
 
 # ** schedule creation
@@ -161,7 +178,7 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
 
   # create kernels from the schedule graph
   realizes: dict[UOp, UOp] = {}
-  tensor_map = graph_rewrite_map(sink, remove_movement_ops+sym)
+  tensor_map = graph_rewrite_map(sink, remove_movement_ops+sym+image_pm)
   buffer_map = graph_rewrite_map(tensor_map[sink], remove_movement_ops+sym+bufferize, realizes)
 
   # schedule
@@ -169,7 +186,7 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
   var_vals: dict[Variable, int] = {}
   for k,v in realizes.items():
     ast = graph_rewrite(v.sink(), debufferize+view_left, bufs:=[k])
-    schedule.append(ScheduleItem(graph_rewrite(ast, to_si+unbind_vars, var_vals), tuple(b.buffer for b in bufs), ()))
+    schedule.append(ScheduleItem(graph_rewrite(ast, unbind_vars+to_si, var_vals), tuple(b.buffer for b in bufs), ()))
     for b in bufs: b.buffer.ref(1)
 
   # update tensor refs
