@@ -438,6 +438,9 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
     if op is Ops.BIND:
       assert isinstance(arg, UOp) and arg.op is Ops.BIND and shape == (), f"trying to create BIND with {arg=} {shape=}"
       return UOp(Ops.VIEW, dtype, (UOp(Ops.DEVICE, arg=device), arg), ShapeTracker.from_shape(()))
+    # empty is EMPTY(VIEW(BUFFER))
+    if op is Ops.EMPTY:
+      return UOp(Ops.EMPTY, dtype, (UOp.new_buffer(device, (st:=ShapeTracker.from_shape(shape)).size, dtype).view(st),))
     # otherwise it's a contiguous st
     return UOp(Ops.VIEW, dtype, (UOp.new_buffer(device, (st:=ShapeTracker.from_shape(shape)).size, dtype), UOp(op, dtype, src, arg)), st)
   def copy_to_device(self, device:str, force=False, clone:bool=False) -> UOp:
@@ -491,17 +494,14 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
   @property
   def buf_uop(self) -> UOp:
     if self.base.op is Ops.BUFFER: return self.base
-    assert self.base.op in {Ops.ASSIGN, Ops.VIEW}, f"buf_uop called on {self.op}"
-    return self.src[0].buf_uop
+    assert self.base.op in {Ops.ASSIGN, Ops.EMPTY}, f"buf_uop called on {self.op}"
+    return self.base.src[0].buf_uop
   def buf_uop_view(self) -> UOp: return self.buf_uop.view(unwrap(self.st))
   @property
   def buffer(self) -> Buffer:
-    if self.base.realized is not None: return self.base.realized
-    if (ret:=buffers.get(self)) is not None: return ret
-    if self.op is Ops.VIEW:
-      assert unwrap(self.st).contiguous, "VIEW only works here if it's contiguous"
-      return self.src[0].buffer
+    if self.op is Ops.EMPTY: return self.buf_uop.buffer
     assert self.op is Ops.BUFFER, f"must be BUFFER {self.op}"
+    if (cret:=buffers.get(self)) is not None: return cret
     from tinygrad.device import Buffer
     buffers[self] = ret = Buffer(self.device, self.size, self.dtype if isinstance(self.dtype, ImageDType) else self.dtype.base)
     return ret

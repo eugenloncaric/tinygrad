@@ -14,7 +14,8 @@ tensor_uop_spec = PatternMatcher([
   (UPat(GroupOp.Movement, name="root", src=(UPat(),)), lambda root: isinstance(root.arg, tuple)),
   (UPat((Ops.DETACH, Ops.CONTIGUOUS), name="root", src=(UPat.var("x"),), arg=None), lambda root,x: root.dtype == x.dtype),
   (UPat(Ops.COPY, name="copy", src=(UPat(Ops.DEVICE), UPat.var("x"))), lambda copy,x: isinstance(copy.arg, bool) and copy.dtype == x.dtype),
-  (UPat(Ops.ASSIGN, name="assign", src=(UPat.var("target"), UPat.var("new_val"))),
+  (UPat(Ops.EMPTY, src=(UPat(Ops.VIEW, src=(UPat(Ops.BUFFER),)),), arg=None), lambda: True),
+  (UPat(Ops.ASSIGN, name="assign", src=(UPat.var("target"), UPat.var("new_val")), arg=None),
    lambda assign,target,new_val: (target.op is Ops.BUFFER or target.is_realized) and (assign.dtype == target.dtype == new_val.dtype)),
 ])
 
@@ -87,7 +88,12 @@ def add_assign(ctx:dict[UOp, UOp], root:UOp, target:UOp):
   ctx[target.base] = root
   return target
 
+def add_empty(ctx:dict[UOp, UOp], root:UOp, target:UOp):
+  ctx[target.base] = root
+  return target
+
 bufferize = PatternMatcher([
+  (UPat(Ops.EMPTY, name="root", src=(UPat.var("target"),)), add_empty),
   (UPat(Ops.ASSIGN, name="root", src=(UPat.var("target"), UPat())), add_assign),
   # bufferize every op except the base sink
   # NOTE: this is just to pass correctness for now
