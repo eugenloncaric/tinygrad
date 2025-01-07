@@ -13,6 +13,8 @@ tensor_uop_spec = PatternMatcher([
   (UPat(Ops.BUFFER, name="root", src=(UPat(Ops.DEVICE))), lambda root: isinstance(root.arg, tuple) and all_int(root.arg) and len(root.arg) == 2),
   (UPat(GroupOp.Movement, name="root", src=(UPat(),)), lambda root: isinstance(root.arg, tuple)),
   (UPat((Ops.DETACH, Ops.CONTIGUOUS), name="root", src=(UPat.var("x"),), arg=None), lambda root,x: root.dtype == x.dtype),
+  (UPat(Ops.BIND, src=(UPat(Ops.DEFINE_VAR), UPat(Ops.CONST)), arg=None), lambda: True),
+  (UPat({Ops.CONST, Ops.DEFINE_VAR}, src=(UPat(Ops.VIEW, src=(UPat(Ops.DEVICE),)),)), lambda: True),
   (UPat(Ops.COPY, name="copy", src=(UPat(Ops.DEVICE), UPat.var("x"))), lambda copy,x: isinstance(copy.arg, bool) and copy.dtype == x.dtype),
   (UPat(Ops.EMPTY, src=(UPat(Ops.VIEW, src=(UPat(Ops.BUFFER),)),), arg=None), lambda: True),
   (UPat(Ops.ASSIGN, name="assign", src=(UPat.var("target"), UPat.var("new_val")), arg=None),
@@ -45,6 +47,7 @@ def collapse_size0_op(root:UOp):
   return root.const_like(0)
 
 def collapse_const_reduce(root:UOp, x:UOp):
+  if not all_int(x.shape): return None
   prshape = prod(unwrap(x.st).shape[i] for i in root.arg[1])
   ret = x.const_arg
   match root.arg[0]:
@@ -79,7 +82,7 @@ sym = symbolic_simple+PatternMatcher([
 ])
 
 def add_buffer(ctx:dict[UOp, UOp], root:UOp):
-  if root.base.st is None or root.base.op in {Ops.BUFFER, Ops.CONST, Ops.VALID, Ops.VIEW}: return None
+  if root.base.st is None or root.base.op in {Ops.SINK, Ops.BIND, Ops.DEFINE_VAR, Ops.BUFFER, Ops.CONST, Ops.VALID, Ops.VIEW}: return None
   buffer = UOp.new_buffer(root.device, root.size, root.dtype)
   ctx[buffer] = root
   return buffer.view(unwrap(root.st))
@@ -97,7 +100,27 @@ bufferize = PatternMatcher([
   (UPat(Ops.ASSIGN, name="root", src=(UPat.var("target"), UPat())), add_assign),
   # bufferize every op except the base sink
   # NOTE: this is just to pass correctness for now
-  (UPat(set(Ops)-{Ops.SINK}, name="root"), add_buffer),
+  (UPat(set(Ops), name="root"), add_buffer),
+])
+
+# ** deal with schedule variables
+
+def unbind_st_vars(ctx:dict[Variable, int], root:UOp):
+  st = unwrap(root.st).simplify()
+  try:
+    st, var_vals = st.unbind()
+    ctx.update(var_vals)
+  except AssertionError: pass # TODO: can unbind just return if the ShapeTracker has already been unbound?
+  return root.replace(arg=st) if st != root.st else None
+
+def unbind_var(ctx:dict[Variable, int], root:UOp):
+  var, val = root.unbind()
+  ctx[var.replace(src=())] = val
+  return var
+
+unbind_vars = PatternMatcher([
+  (UPat(Ops.VIEW, name="root"), unbind_st_vars),
+  (UPat(Ops.BIND, name="root"), unbind_var),
 ])
 
 # ** ast rewrite
@@ -124,7 +147,8 @@ to_si = PatternMatcher([
   (UPat(Ops.SINK, src=(UPat.store(UPat(), UPat(), UPat(GroupOp.Meta, name="meta")))), lambda meta:meta),
   (UPat(Ops.CONTIGUOUS, src=(UPat.var("x"),)), lambda x:x),
   (UPat(Ops.ASSIGN, src=(UPat(), UPat.var("x"),)), lambda x:x),
-  (UPat(Ops.CONST, name="root", src=(UPat(),)), lambda root:root.replace(src=())),
+  (UPat({Ops.CONST, Ops.DEFINE_VAR}, name="root", src=(UPat(),)), lambda root:root.replace(src=()) if all_int(root.shape) \
+      else UOp(Ops.VALID, dtypes.bool, (unwrap(root.st).to_uop(),)).where(root.replace(src=()), 0)),
 ])
 
 # ** schedule creation
@@ -136,16 +160,16 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
   type_verify(list(sink.toposort), tensor_uop_spec)
 
   # create kernels from the schedule graph
-  var_vals: dict[Variable, int] = {}
   realizes: dict[UOp, UOp] = {}
   tensor_map = graph_rewrite_map(sink, remove_movement_ops+sym)
   buffer_map = graph_rewrite_map(tensor_map[sink], remove_movement_ops+sym+bufferize, realizes)
 
   # schedule
   schedule: list[ScheduleItem] = []
+  var_vals: dict[Variable, int] = {}
   for k,v in realizes.items():
     ast = graph_rewrite(v.sink(), debufferize+view_left, bufs:=[k])
-    schedule.append(ScheduleItem(graph_rewrite(ast, to_si), tuple(b.buffer for b in bufs), ()))
+    schedule.append(ScheduleItem(graph_rewrite(ast, to_si+unbind_vars, var_vals), tuple(b.buffer for b in bufs), ()))
     for b in bufs: b.buffer.ref(1)
 
   # update tensor refs
