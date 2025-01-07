@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from tinygrad.dtype import dtypes
-from tinygrad.ops import UOp, Ops, GroupOp, Variable, PatternMatcher, UPat, type_verify, graph_rewrite_map, graph_rewrite, track_rewrites, identity_element
-from tinygrad.ops import merge_views, symbolic_simple, view_left
+from tinygrad.ops import UOp, Ops, GroupOp, Variable, PatternMatcher, UPat, type_verify, graph_rewrite, track_rewrites, identity_element
+from tinygrad.ops import merge_views, symbolic_simple, view_left, graph_rewrite_map
 from tinygrad.device import Buffer
 from tinygrad.helpers import Metadata, all_int, unwrap, prod
 from tinygrad.shape.shapetracker import ShapeTracker
@@ -11,9 +11,11 @@ from tinygrad.shape.shapetracker import ShapeTracker
 tensor_uop_spec = PatternMatcher([
   (UPat(Ops.DEVICE, dtypes.void, (), name="root"), lambda root: isinstance(root.arg, str)),
   (UPat(Ops.BUFFER, name="root", src=(UPat(Ops.DEVICE))), lambda root: isinstance(root.arg, tuple) and all_int(root.arg) and len(root.arg) == 2),
-  (UPat(Ops.COPY, name="root", src=(UPat(Ops.DEVICE), UPat.var("copyin"))), lambda root,copyin: isinstance(root.arg, bool) and copyin.dtype == root.dtype),
   (UPat(GroupOp.Movement, name="root", src=(UPat(),)), lambda root: isinstance(root.arg, tuple)),
-  (UPat({Ops.CONTIGUOUS, Ops.DETACH}, src=(UPat(),)), lambda: True),
+  (UPat((Ops.DETACH, Ops.CONTIGUOUS), name="root", src=(UPat.var("x"),), arg=None), lambda root,x: root.dtype == x.dtype),
+  (UPat(Ops.COPY, name="copy", src=(UPat(Ops.DEVICE), UPat.var("x"))), lambda copy,x: isinstance(copy.arg, bool) and copy.dtype == x.dtype),
+  (UPat(Ops.ASSIGN, name="assign", src=(UPat.var("target"), UPat.var("new_val"))),
+   lambda assign,target,new_val: (target.op is Ops.BUFFER or target.is_realized) and (assign.dtype == target.dtype == new_val.dtype)),
 ])
 
 # ** ScheduleItem return type
@@ -28,9 +30,9 @@ class ScheduleItem:
 
 remove_movement_ops = merge_views+PatternMatcher([
   (UPat(GroupOp.Movement, name="mov", src=(UPat.var("x"),)), lambda mov,x: x.view(mov.st)),
-  (UPat(Ops.VIEW, name="view", src=(UPat.var("x"),)), lambda view,x: x if view.st.contiguous and x.st is not None and x.shape == view.shape else None),
+  (UPat(Ops.VIEW, name="view", src=(UPat.var("x"),)), lambda view,x:x if view.st.contiguous and x.st is not None and x.shape == view.shape else None),
   # const is free to copy around, so this view just merges
-  (UPat(Ops.VIEW, name="vm1", src=(UPat(Ops.CONST, name="x", src=(UPat(Ops.VIEW, name="vm2"),)),)), lambda x,vm1,vm2: x.replace(src=(vm2.view(vm1.st),))),
+  (UPat(Ops.VIEW, name="v2", src=(UPat(Ops.CONST, name="x", src=(UPat(Ops.VIEW, name="v1"),)),)), lambda x,v1,v2: x.replace(src=(v1.view(v2.st),))),
   # masked const becomes a valid, this structurally preventrs const folding.
   (UPat(Ops.CONST, name="root", src=(UPat(Ops.VIEW, name="view"),)),
    lambda root,view: None if view.st.views[0].mask is None else root.valid())
@@ -51,8 +53,17 @@ def collapse_const_reduce(root:UOp, x:UOp):
     case _: return None
   return root.const_like(ret)
 
+def reorder_assigns(root:UOp):
+  if len([x for x in root.src if x.op is Ops.ASSIGN]) == 0: return None
+  # TODO: handle multiple diamond assigns
+  new_src = sorted(root.src, key=lambda x:0 if x.op is Ops.ASSIGN else -1)
+  return root.replace(src=tuple(new_src)) if tuple(new_src) != root.src else None
+
 sym = symbolic_simple+PatternMatcher([
   (UPat(set(Ops), name="root"), collapse_size0_op),
+
+  # reorder sources such that LOAD comes before ASSIGN
+  (UPat(set(Ops), name="root"), reorder_assigns),
 
   # reduce folding
   (UPat(Ops.REDUCE_AXIS, name="root", src=(UPat(Ops.CONST, arg=0),)),
@@ -72,7 +83,14 @@ def add_buffer(ctx:dict[UOp, UOp], root:UOp):
   ctx[buffer] = root
   return buffer.view(unwrap(root.st))
 
+def add_assign(ctx:dict[UOp, UOp], root:UOp, target:UOp):
+  ctx[target.base] = root
+  return target
+
 bufferize = PatternMatcher([
+  (UPat(Ops.ASSIGN, name="root", src=(UPat.var("target"), UPat())), add_assign),
+  # bufferize every op except the base sink
+  # NOTE: this is just to pass correctness for now
   (UPat(set(Ops)-{Ops.SINK}, name="root"), add_buffer),
 ])
 
@@ -99,6 +117,7 @@ debufferize = PatternMatcher([
 to_si = PatternMatcher([
   (UPat(Ops.SINK, src=(UPat.store(UPat(), UPat(), UPat(GroupOp.Meta, name="meta")))), lambda meta:meta),
   (UPat(Ops.CONTIGUOUS, src=(UPat.var("x"),)), lambda x:x),
+  (UPat(Ops.ASSIGN, src=(UPat(), UPat.var("x"),)), lambda x:x),
   (UPat(Ops.CONST, name="root", src=(UPat(),)), lambda root:root.replace(src=())),
 ])
 
@@ -133,9 +152,10 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
   for k,v in realizes.items():
     ast = graph_rewrite(v.sink(), debufferize+view_left, bufs:=[k])
     schedule.append(ScheduleItem(graph_rewrite(ast, to_si), tuple(b.buffer for b in bufs), ()))
-    # update buffer refs
+    # update buffer refs for unrealized tensors
     for b in bufs: b.buffer.ref(1)
     tensor_refs = tensor_buffers[k]
     for tr in tensor_refs:
+      if tr.base is k: continue # tensors that are assign targets are already realized
       becomes_map[tr] = k.view(unwrap(tr.st))
   return schedule, var_vals, becomes_map
