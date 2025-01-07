@@ -287,6 +287,8 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
     if self.op is Ops.BUFFER: return ShapeTracker.from_shape((self.size,))
     # otherwise we derive shape from sources
     if not (src_sts := [x.st for x in self.src if x.st is not None]): return None
+    # NOTE: BUFFER_VIEW is allowed to change the shape of its source for shape changing bitcast
+    if self.op is Ops.BUFFER_VIEW: return src_sts[0]
     if not all_same([x.shape for x in src_sts]):
       # SINK with different src shapes has an undefined shape
       if self.op is Ops.SINK: return None
@@ -422,7 +424,9 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
     if DEBUG >= 3: print(f"split {divisor}: {self.shape} -> {splitted.shape} -> {new_shape}")
     return splitted._reduce_op(op, axis)._reduce_op(op, (len(new_shape),)).reshape(new_shape)  # reduce original axes, then split
   def assign(self, x:UOp): return UOp(Ops.ASSIGN, self.dtype, (self,x))
-  def contiguous(self, allow_buffer_view=True): return self.alu(Ops.CONTIGUOUS)
+  def contiguous(self, allow_buffer_view=True):
+    if allow_buffer_view and self.can_view(): return self.metaop(Ops.BUFFER_VIEW, self.shape, self.dtype, self.device, None, (self,))
+    return self.alu(Ops.CONTIGUOUS)
 
   # *** from LazyBuffer ***
 
@@ -443,8 +447,10 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
     # empty is EMPTY(VIEW(BUFFER))
     if op is Ops.EMPTY:
       return UOp(Ops.EMPTY, dtype, (UOp.new_buffer(device, (st:=ShapeTracker.from_shape(shape)).size, dtype).view(st),))
-    # otherwise it's a contiguous st
-    return UOp(Ops.VIEW, dtype, (UOp.new_buffer(device, (st:=ShapeTracker.from_shape(shape)).size, dtype), UOp(op, dtype, src, arg)), st)
+    # otherwise it's BUFFER_VIEW(src)
+    assert op is Ops.BUFFER_VIEW and len(src) == 1
+    st_device = UOp(Ops.VIEW, dtypes.void, (UOp(Ops.DEVICE, arg=device),), ShapeTracker.from_shape(shape))
+    return UOp(Ops.BUFFER_VIEW, dtype, (st_device, src[0]))
   def copy_to_device(self, device:str, force=False, clone:bool=False) -> UOp:
     # no COPY
     if self.device == device and not clone: return self

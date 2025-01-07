@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from tinygrad.dtype import ImageDType, dtypes
-from tinygrad.ops import UOp, Ops, GroupOp, Variable, PatternMatcher, UPat, type_verify, graph_rewrite, track_rewrites, identity_element
+from tinygrad.ops import UOp, Ops, GroupOp, Variable, PatternMatcher, UPat, type_verify, graph_rewrite, track_rewrites, identity_element, buffers
 from tinygrad.ops import merge_views, symbolic_simple, view_left, graph_rewrite_map
 from tinygrad.device import Buffer
 from tinygrad.helpers import Metadata, DEBUG, all_int, unwrap, prod
@@ -17,6 +17,7 @@ tensor_uop_spec = PatternMatcher([
   (UPat({Ops.CONST, Ops.DEFINE_VAR}, src=(UPat(Ops.VIEW, src=(UPat(Ops.DEVICE),)),)), lambda: True),
   (UPat(Ops.COPY, name="copy", src=(UPat(Ops.DEVICE), UPat.var("x"))), lambda copy,x: isinstance(copy.arg, bool) and copy.dtype == x.dtype),
   (UPat(Ops.EMPTY, src=(UPat(Ops.VIEW, src=(UPat(Ops.BUFFER),)),), arg=None), lambda: True),
+  (UPat(Ops.BUFFER_VIEW, src=(UPat(Ops.VIEW, src=(UPat(Ops.DEVICE),)), UPat()), arg=None), lambda: True),
   (UPat(Ops.ASSIGN, name="assign", src=(UPat.var("target"), UPat.var("new_val")), arg=None),
    lambda assign,target,new_val: (target.op is Ops.BUFFER or target.is_realized) and (assign.dtype == target.dtype == new_val.dtype)),
 ])
@@ -95,9 +96,15 @@ def add_empty(ctx:dict[UOp, UOp], root:UOp, target:UOp):
   ctx[target.base] = root
   return target
 
+def add_buffer_view(ctx:dict[UOp, UOp], root:UOp, src:UOp):
+  sbuf = UOp.new_buffer(root.device, root.size, root.dtype)
+  buffers[sbuf] = src.base.buffer.view(root.size, root.dtype, unwrap(src.st).views[0].offset*src.dtype.itemsize)
+  return sbuf.view(unwrap(root.st))
+
 bufferize = PatternMatcher([
   (UPat(Ops.EMPTY, name="root", src=(UPat.var("target"),)), add_empty),
   (UPat(Ops.ASSIGN, name="root", src=(UPat.var("target"), UPat())), add_assign),
+  (UPat(Ops.BUFFER_VIEW, name="root", src=(UPat(), UPat.var("src"))), add_buffer_view),
   # bufferize every op except the base sink
   # NOTE: this is just to pass correctness for now
   (UPat(set(Ops), name="root"), add_buffer),
