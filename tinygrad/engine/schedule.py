@@ -160,7 +160,7 @@ def add_stores(sink:UOp):
   for i,x in enumerate(sink.src):
     glbl = UOp(Ops.DEFINE_GLOBAL, x.dtype.ptr(size=x.size), (), i)
     new_src.append(UOp.store(glbl, ShapeTracker.from_shape(x.shape).to_uop(), x))
-  return UOp.sink(*new_src)
+  return sink.replace(src=tuple(new_src))
 
 debufferize = PatternMatcher([
   (UPat(Ops.BUFFER, name="buf"), add_loads),
