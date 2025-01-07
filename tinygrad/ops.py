@@ -282,11 +282,14 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
     if self.op in GroupOp.Movement: return unwrap(self.src[0].st).mop(self.op, self.arg)
     # buffer ops return the ShapeTracker from sources
     if self.op in GroupOp.Buffer: return vsrc[0] if len(vsrc:=[x.st for x in self.src if x.op is Ops.VIEW]) != 0 else None
+    from tinygrad.shape.shapetracker import ShapeTracker
+    # BUFFER is a contiguous piece of memory, it has shape=(N,) with stride=(1,)
+    if self.op is Ops.BUFFER: return ShapeTracker.from_shape((self.size,))
+    # otherwise we derive shape from sources
     if not (src_sts := [x.st for x in self.src if x.st is not None]): return None
     assert all_same([x.shape for x in src_sts]), f"UOp sources must have the same shape {self} {[x.shape for x in src_sts]}"
     # only reduce ops are allowed to change shape, everything else derives shape from sources
     shape = src_sts[0].reduce(self.axis_arg) if self.op in (Ops.REDUCE_AXIS, Ops.WMMA) else src_sts[0].shape
-    from tinygrad.shape.shapetracker import ShapeTracker
     return ShapeTracker.from_shape(shape)
 
   @functools.cached_property
@@ -469,13 +472,8 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
   @property
   def base(self) -> UOp:
     if self.op in GroupOp.Movement: return self.src[0].base
-    return self.src[0] if self.op is Ops.VIEW and len(self.src) == 1 and self.src[0].op is not Ops.BUFFER else self
-  def view(self, new_st:ShapeTracker) -> UOp:
-    if self.st is None: return UOp(Ops.VIEW, self.dtype.base if not isinstance(self.dtype, ImageDType) else self.dtype, (self,), new_st)
-    ret = UOp(Ops.VIEW, self.dtype, (self.base,), new_st)
-    # instant folding rules
-    if new_st.contiguous and self.base.shape == new_st.shape: return self.base
-    return ret
+    return self.src[0] if self.op is Ops.VIEW and len(self.src) == 1 else self
+  def view(self, new_st:ShapeTracker) -> UOp: return UOp(Ops.VIEW, self.dtype, (self.base,), new_st)
 
   def _mop(self, op:Ops, arg):
     ret = UOp(op, self.dtype, (self,), arg)
@@ -518,9 +516,7 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
     buffers[self] = ret = Buffer(self.device, self.size, self.dtype if isinstance(self.dtype, ImageDType) else self.dtype.base)
     return ret
   @property
-  def realized(self) -> Optional[Buffer]:
-    if self.op is Ops.VIEW and len(self.src) == 1 and self.src[0].op is Ops.BUFFER: return buffers[self.src[0]]
-    return None
+  def realized(self) -> Optional[Buffer]: return buffers.get(self) if self.op is Ops.BUFFER else None
   @property
   def is_realized(self) -> bool: return self.base.realized is not None
 
@@ -891,6 +887,12 @@ def graph_rewrite(sink:UOp, pm:PatternMatcher, ctx=None, bottom_up=False) -> UOp
   if TRACK_MATCH_STATS >= 2 and not bottom_up and len(tracked_ctxs) != 0: # TODO: make viz work with bottom_up=True
     tracked_ctxs[-1].append(TrackedGraphRewrite(((frm:=sys._getframe(1)).f_code.co_filename, frm.f_lineno), sink))
   return RewriteContext(pm, ctx).bottom_up_rewrite(sink) if bottom_up else RewriteContext(pm, ctx).rewrite(sink)
+
+def graph_rewrite_map(sink:UOp, pm:PatternMatcher, ctx=None, bottom_up=False) -> dict[UOp, UOp]:
+  if TRACK_MATCH_STATS >= 2 and not bottom_up and len(tracked_ctxs) != 0: # TODO: make viz work with bottom_up=True
+    tracked_ctxs[-1].append(TrackedGraphRewrite(((frm:=sys._getframe(1)).f_code.co_filename, frm.f_lineno), sink))
+  rewrite_ctx = RewriteContext(pm, ctx)
+  return {k:(rewrite_ctx.bottom_up_rewrite(k) if bottom_up else rewrite_ctx.rewrite(k)) for k in list(sink.toposort)[::-1]}
 
 # ***** uop type spec *****
 
