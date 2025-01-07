@@ -149,4 +149,9 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
     if buf_ref is not None and buf_ref.base is not k.base and buf_ref.base.op is Ops.BUFFER:
       becomes_map[k] = buf_ref.base.view(unwrap(k.st))
 
+  # confirm everything was scheduled correctly
+  allocated_bufs = set(realizes)
+  backrefed_bufs = set([x.base for x in becomes_map.values()])
+  if len(zombies:=(allocated_bufs - backrefed_bufs)) != 0:
+    raise AssertionError(f"have zombie bufs leftover {zombies}")
   return schedule, var_vals, becomes_map
