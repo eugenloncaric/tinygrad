@@ -107,7 +107,9 @@ bufferize = PatternMatcher([
   (UPat(Ops.BUFFER_VIEW, name="root", src=(UPat(), UPat.var("src"))), add_buffer_view),
   # bufferize every op except the base sink
   # NOTE: this is just to pass correctness for now
-  (UPat(set(Ops), name="root"), add_buffer),
+  (UPat(Ops.COPY, name="root"), add_buffer),
+  (UPat(Ops.REDUCE_AXIS, name="root"), add_buffer),
+  (UPat(Ops.CONTIGUOUS, name="root"), add_buffer),
 ])
 
 # ** deal with schedule variables
@@ -192,7 +194,7 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
   schedule: list[ScheduleItem] = []
   var_vals: dict[Variable, int] = {}
   for k,v in realizes.items():
-    ast = graph_rewrite(v.sink(), debufferize+view_left, bufs:=[k])
+    ast = graph_rewrite(v.sink(), debufferize+view_left+remove_movement_ops, bufs:=[k])
     schedule.append(ScheduleItem(graph_rewrite(ast, unbind_vars+to_si, var_vals), tuple(b.buffer for b in bufs), ()))
     for b in bufs: b.buffer.ref(1)
 
