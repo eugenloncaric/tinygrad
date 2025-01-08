@@ -2251,5 +2251,13 @@ class TestRealizeMeansRealize(unittest.TestCase):
     Tensor.realize(add, add)
     self.assertIsNotNone(add.lazydata.base.realized)
 
+  @unittest.expectedFailure # TODO: fix this
+  def test_realize_idempotent_prune_permutes(self):
+    a = Tensor.full((4, 3, 2), 2.).contiguous().realize()
+    b = Tensor.full((4, 3, 2), 4.).contiguous().realize()
+    add = a+b
+    Tensor.realize(add.permute(2, 0, 1), add.permute(1, 0, 2))
+    self.assertIsNotNone(add.lazydata.base.realized)
+
 if __name__ == '__main__':
   unittest.main(verbosity=2)

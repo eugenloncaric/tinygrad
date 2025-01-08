@@ -119,7 +119,8 @@ def bufferize_input(ctx:dict[UOp, UOp], root:UOp, dest:UOp, x:UOp):
   return root.replace(src=(dest, buffer_src.view(unwrap(x.st))))
 
 def ensure_realized(ctx:dict[UOp, UOp], root:UOp):
-  new_src = [x if (buf:=create_buffer(ctx, x.base)) is None else buf.view(x.st) for x in dedup(root.src)]
+  pruned = dedup([x.base for x in root.src]) # TODO: is this worthy of its own rule?
+  new_src = [x if (buf:=create_buffer(ctx, x.base)) is None else buf.view(x.st) for x in pruned]
   return None if tuple(new_src) == root.src else root.replace(src=tuple(new_src))
 
 bufferize = PatternMatcher([
@@ -244,6 +245,6 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
   backrefed_bufs = set([x.base for x in becomes_map.values()])
   if len(zombies:=(allocated_bufs - backrefed_bufs)) != 0:
     if DEBUG >= 3:
-      for z in zombies: print(z.arg[0], rev_realize[z])
+      for z in zombies: print(z.arg[0], rev_realize.get(z))
     raise AssertionError(f"have zombie bufs leftover {zombies}")
   return schedule, var_vals, becomes_map
