@@ -108,20 +108,25 @@ def view_src(ctx:dict[UOp, UOp], src:UOp, view:UOp):
   if (buffer_src:=create_buffer(ctx, src)) is None: return None
   return buffer_src.view(view.st)
 
-def ensure_realized(ctx:dict[UOp, UOp], root:UOp, dest:UOp, x:UOp):
+def bufferize_input(ctx:dict[UOp, UOp], root:UOp, dest:UOp, x:UOp):
   if x.base.op is Ops.BUFFER: return None
-  buffer_src = create_buffer(ctx, x.base).view(x.st)
-  assert buffer_src is not None, f"expected src of root {buffer_src} to be bufferizable"
-  return root.replace(src=(dest, buffer_src))
+  if (buffer_src:=create_buffer(ctx, x.base)) is None: raise RuntimeError(f"expected src of {x} to be bufferizable")
+  return root.replace(src=(dest, buffer_src.view(unwrap(x.st))))
+
+def ensure_realized(ctx:dict[UOp, UOp], root:UOp):
+  new_src = [x if (buf:=create_buffer(ctx, x.base)) is None else buf.view(x.st) for x in root.src]
+  return None if tuple(new_src) == root.src else root.replace(src=tuple(new_src))
 
 bufferize = PatternMatcher([
   # ensure COPY and BUFFER_VIEW inputs are realized
-  (UPat({Ops.COPY, Ops.BUFFER_VIEW}, name="root", src=(UPat.var("dest"), UPat.var("x"),)), ensure_realized),
+  (UPat({Ops.COPY, Ops.BUFFER_VIEW}, name="root", src=(UPat.var("dest"), UPat.var("x"),)), bufferize_input),
+  # ensure SINKED uops are realized
+  (UPat(Ops.SINK, name="root"), ensure_realized),
   # allocate new bufs for contiguous and copy
   (UPat({Ops.COPY, Ops.CONTIGUOUS}, name="root"), create_buffer),
   # simple rule for REDUCE_AXIS. TODO: fuse when it makes sense
   (UPat(Ops.REDUCE_AXIS, name="root"), create_buffer),
-  # realize before view
+  # realize before expand or unsafe pad ops
   (UPat(Ops.VIEW, name="view", src=(UPat.var("src"),)), view_src),
 
   # add the pre existing buffers in EMPTY and ASSIGN
