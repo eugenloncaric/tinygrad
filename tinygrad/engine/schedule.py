@@ -3,7 +3,7 @@ from tinygrad.dtype import ImageDType, dtypes
 from tinygrad.ops import UOp, Ops, GroupOp, Variable, PatternMatcher, UPat, type_verify, graph_rewrite, track_rewrites, identity_element, buffers
 from tinygrad.ops import merge_views, symbolic_simple, view_left, graph_rewrite_map
 from tinygrad.device import Buffer
-from tinygrad.helpers import Metadata, DEBUG, all_int, unwrap, prod
+from tinygrad.helpers import Metadata, DEBUG, all_int, unwrap, prod, dedup
 from tinygrad.shape.shapetracker import ShapeTracker
 
 BUF_LIMIT = {"METAL":32}
@@ -42,7 +42,7 @@ remove_movement_ops = merge_views+PatternMatcher([
   (UPat(Ops.VIEW, name="view", src=(UPat.var("x"),)), lambda view,x:x if view.st.contiguous and x.st is not None and x.shape == view.shape else None),
   # const is free to copy around, so this view just merges
   (UPat(Ops.VIEW, name="v2", src=(UPat(Ops.CONST, name="x", src=(UPat(Ops.VIEW, name="v1"),)),)), lambda x,v1,v2: x.replace(src=(v1.view(v2.st),))),
-  # masked const becomes a valid, this structurally preventrs const folding.
+  # masked CONST becomes VALID, this structurally prevents future const folding
   (UPat(Ops.CONST, name="root", src=(UPat(Ops.VIEW, name="view"),)),
    lambda root,view: None if view.st.views[0].mask is None else root.valid())
 ])
@@ -119,7 +119,7 @@ def bufferize_input(ctx:dict[UOp, UOp], root:UOp, dest:UOp, x:UOp):
   return root.replace(src=(dest, buffer_src.view(unwrap(x.st))))
 
 def ensure_realized(ctx:dict[UOp, UOp], root:UOp):
-  new_src = [x if (buf:=create_buffer(ctx, x.base)) is None else buf.view(x.st) for x in root.src]
+  new_src = [x if (buf:=create_buffer(ctx, x.base)) is None else buf.view(x.st) for x in dedup(root.src)]
   return None if tuple(new_src) == root.src else root.replace(src=tuple(new_src))
 
 bufferize = PatternMatcher([
@@ -189,7 +189,7 @@ def add_loads(ctx:list[UOp], buf:UOp):
 def add_stores(sink:UOp):
   if all(x.op is Ops.STORE for x in sink.src): return None
   new_src: list[UOp] = []
-  for i,x in enumerate(sink.src):
+  for i,x in enumerate(dedup(sink.src)):
     glbl = UOp(Ops.DEFINE_GLOBAL, x.dtype.ptr(size=x.size), (), i)
     new_src.append(UOp.store(glbl, ShapeTracker.from_shape(x.shape).to_uop(), x))
   return sink.replace(src=tuple(new_src))
@@ -235,17 +235,15 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
   rev_realize = {v:k for k,v in realizes.items()}
   becomes_map: dict[UOp, UOp] = {}
   for k,v in tensor_map.items():
-    if (buf_ref:=buffer_map.get(v)) is None or v.base is k.base: continue
-    becomes = None
-    if (realized:=rev_realize.get(buf_ref)) is not None: becomes = realized.view(unwrap(k.st))
-    elif buf_ref.base.op is Ops.BUFFER:
-      becomes = buf_ref.base.view(unwrap(k.st))
-    
-    if becomes: becomes_map[k] = becomes
+    if (buf_ref:=buffer_map.get(v)) is None or k.base is buf_ref.base: continue
+    if (realized:=rev_realize.get(buf_ref)) is None and buf_ref.base.op is Ops.BUFFER: realized = buf_ref
+    if realized is not None: becomes_map[k] = realized.view(unwrap(k.st))
 
   # confirm everything was scheduled correctly
   allocated_bufs = set(realizes)
   backrefed_bufs = set([x.base for x in becomes_map.values()])
   if len(zombies:=(allocated_bufs - backrefed_bufs)) != 0:
+    if DEBUG >= 3:
+      for z in zombies: print(z.arg[0], rev_realize[z])
     raise AssertionError(f"have zombie bufs leftover {zombies}")
   return schedule, var_vals, becomes_map

@@ -2244,5 +2244,12 @@ class TestRealizeMeansRealize(unittest.TestCase):
     add.realize()
     self.assertIsNotNone(add.lazydata.base.realized)
 
+  def test_realize_idempotent(self):
+    a = Tensor([1, 2, 3])
+    b = Tensor([4, 5, 6])
+    add = a+b
+    Tensor.realize(add, add)
+    self.assertIsNotNone(add.lazydata.base.realized)
+
 if __name__ == '__main__':
   unittest.main(verbosity=2)
