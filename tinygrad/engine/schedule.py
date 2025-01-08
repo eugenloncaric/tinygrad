@@ -95,6 +95,11 @@ sym = symbolic_simple+PatternMatcher([
   # COPY to the same device collapses unless clone
   (UPat(Ops.COPY, name="root", src=(UPat(), UPat.var("x"))), lambda root,x: None if root.arg is True or root.device != x.device else x),
 
+  # cast folding
+  # CAST(VIEW(x)) -> VIEW(CAST(x)) maybe
+  (UPat(Ops.CAST, name="root", src=(UPat(Ops.VIEW, name="view", src=(UPat.var("x"),),))),
+   lambda x,root,view: x.cast(root.dtype).view(view.st) if root.dtype.itemsize <= x.dtype.itemsize else None),
+
   # detach is a noop here
   (UPat(Ops.DETACH, src=(UPat.var("x"))), lambda x:x),
 ])
@@ -179,15 +184,14 @@ unbind_vars = PatternMatcher([
 # ** deal with ImageDType
 
 def can_image(root:UOp):
-  assert root is root.base, f"can only make things that can't be images not images in base {root}"
   if not isinstance(dtype:=root.dtype, ImageDType) or root.st is None: return None
   if (prod(root.shape) != prod(dtype.shape) or not any(root.shape[x]%4 == 0 for x in unwrap(root.st).unit_stride_axes())):
     if DEBUG >= 2: print(f"forcing image {dtype} with shape {root.shape} to {dtype.base}")
-    return root.replace(dtype=root.dtype.base)
+    return root.replace(dtype=root.dtype.base).view(unwrap(root.st))
 
-image_pm = PatternMatcher([
-  # sometimes we make things that can't be images not images (must be base)
-  (UPat(set(Ops)-{Ops.VIEW}, name="root"), can_image),
+remove_image_dtype = PatternMatcher([
+  # sometimes we make things that can't be images not images
+  (UPat(Ops.BUFFER, name="root"), can_image),
 ])
 
 # ** ast rewrite
@@ -237,8 +241,8 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
 
   # create kernels from the schedule graph
   realizes: dict[UOp, UOp] = {}
-  tensor_map = graph_rewrite_map(sink, remove_movement_ops+sym+image_pm)
-  buffer_map = graph_rewrite_map(tensor_map[sink], remove_movement_ops+sym+bufferize, realizes)
+  tensor_map = graph_rewrite_map(sink, remove_movement_ops+sym)
+  buffer_map = graph_rewrite_map(tensor_map[sink], remove_image_dtype+remove_movement_ops+sym+bufferize, realizes)
 
   # schedule
   schedule: list[ScheduleItem] = []
