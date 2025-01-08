@@ -6,20 +6,25 @@ from tinygrad.device import Buffer
 from tinygrad.helpers import Metadata, DEBUG, all_int, unwrap, prod
 from tinygrad.shape.shapetracker import ShapeTracker
 
+BUF_LIMIT = {"METAL":32}
+
 # ** tensor uop spec
 
 tensor_uop_spec = PatternMatcher([
   (UPat(Ops.DEVICE, dtypes.void, (), name="root"), lambda root: isinstance(root.arg, str)),
   (UPat(Ops.BUFFER, name="root", src=(UPat(Ops.DEVICE))), lambda root: isinstance(root.arg, tuple) and all_int(root.arg) and len(root.arg) == 2),
   (UPat(GroupOp.Movement, name="root", src=(UPat(),)), lambda root: isinstance(root.arg, tuple)),
-  (UPat((Ops.DETACH, Ops.CONTIGUOUS), name="root", src=(UPat.var("x"),), arg=None), lambda root,x: root.dtype == x.dtype),
+
   (UPat(Ops.BIND, src=(UPat(Ops.DEFINE_VAR), UPat(Ops.CONST)), arg=None), lambda: True),
   (UPat({Ops.CONST, Ops.DEFINE_VAR}, src=(UPat(Ops.VIEW, src=(UPat(Ops.DEVICE),)),)), lambda: True),
+
   (UPat(Ops.COPY, name="copy", src=(UPat(Ops.DEVICE), UPat.var("x"))), lambda copy,x: isinstance(copy.arg, bool) and copy.dtype == x.dtype),
   (UPat(Ops.EMPTY, src=(UPat(Ops.VIEW, src=(UPat(Ops.BUFFER),)),), arg=None), lambda: True),
   (UPat(Ops.BUFFER_VIEW, src=(UPat(Ops.VIEW, src=(UPat(Ops.DEVICE),)), UPat()), arg=None), lambda: True),
+
   (UPat(Ops.ASSIGN, name="assign", src=(UPat.var("target"), UPat.var("new_val")), arg=None),
    lambda assign,target,new_val: (target.op is Ops.BUFFER or target.is_realized) and (assign.dtype == target.dtype == new_val.dtype)),
+  (UPat((Ops.DETACH, Ops.CONTIGUOUS), name="root", src=(UPat.var("x"),), arg=None), lambda root,x: root.dtype == x.dtype),
 ])
 
 # ** ScheduleItem return type
@@ -92,15 +97,15 @@ def create_buffer(ctx:dict[UOp, UOp], root:UOp):
   ctx[buffer] = root
   return buffer.view(unwrap(root.st))
 
+def create_subbuffer(ctx:dict[UOp, UOp], root:UOp, src:UOp):
+  sbuffer = UOp.new_buffer(root.device, root.size, root.dtype)
+  buffers[sbuffer] = src.base.buffer.view(root.size, root.dtype, unwrap(src.st).views[0].offset*src.dtype.itemsize)
+  ctx[sbuffer] = root
+  return sbuffer.view(unwrap(root.st))
+
 def add_target_buf(ctx:dict[UOp, UOp], root:UOp, target:UOp):
   ctx[target.base] = root
   return target
-
-def add_buffer_view(ctx:dict[UOp, UOp], root:UOp, src:UOp):
-  sbuf = UOp.new_buffer(root.device, root.size, root.dtype)
-  buffers[sbuf] = src.base.buffer.view(root.size, root.dtype, unwrap(src.st).views[0].offset*src.dtype.itemsize)
-  ctx[sbuf] = root
-  return sbuf.view(unwrap(root.st))
 
 def view_src(ctx:dict[UOp, UOp], src:UOp, view:UOp):
   if src.op is Ops.BUFFER or src.st is None: return None
@@ -134,7 +139,7 @@ bufferize = PatternMatcher([
   (UPat(Ops.ASSIGN, name="root", src=(UPat.var("target"), UPat())), add_target_buf),
 
   # create subbuffer for BUFFER_VIEW
-  (UPat(Ops.BUFFER_VIEW, name="root", src=(UPat(), UPat.var("src"))), add_buffer_view),
+  (UPat(Ops.BUFFER_VIEW, name="root", src=(UPat(), UPat.var("src"))), create_subbuffer),
 ])
 
 # ** deal with schedule variables
@@ -155,7 +160,7 @@ def unbind_var(ctx:dict[Variable, int], root:UOp):
 unbind_vars = PatternMatcher([
   (UPat(Ops.VIEW, name="root"), unbind_st_vars),
   (UPat(Ops.BIND, name="root"), unbind_var),
-  # TODO: for some reason bound sts should keep existing on const reduce even if they are unmasked
+  # TODO: for some reason symbolic sts should keep existing on const reduce even if they are unmasked
   (UPat({Ops.CONST, Ops.DEFINE_VAR}, name="root", src=(UPat(),)), lambda root:root.replace(src=()) if all_int(root.shape) \
       else UOp(Ops.VALID, dtypes.bool, (unwrap(root.st).to_uop(),)).where(root.replace(src=()), 0)),
 ])
@@ -170,7 +175,7 @@ def can_image(root:UOp):
     return root.replace(dtype=root.dtype.base)
 
 image_pm = PatternMatcher([
-  # sometimes we make things that can't be images not images
+  # sometimes we make things that can't be images not images (must be base)
   (UPat(set(Ops)-{Ops.VIEW}, name="root"), can_image),
 ])
 
@@ -192,6 +197,9 @@ def add_stores(sink:UOp):
 debufferize = PatternMatcher([
   (UPat(Ops.BUFFER, name="buf"), add_loads),
   (UPat(Ops.SINK, name="sink"), add_stores),
+])
+
+view_right = PatternMatcher([
 ])
 
 to_si = PatternMatcher([
@@ -224,14 +232,20 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
     for b in bufs: b.buffer.ref(1)
 
   # update tensor refs
+  rev_realize = {v:k for k,v in realizes.items()}
   becomes_map: dict[UOp, UOp] = {}
   for k,v in tensor_map.items():
-    buf_ref = buffer_map.get(v)
-    if buf_ref is not None and buf_ref.base is not k.base and buf_ref.base.op is Ops.BUFFER:
-      becomes_map[k] = buf_ref.base.view(unwrap(k.st))
+    if (buf_ref:=buffer_map.get(v)) is None or v.base is k.base: continue
+    becomes = None
+    if (realized:=rev_realize.get(buf_ref)) is not None: becomes = realized.view(unwrap(k.st))
+    elif buf_ref.base.op is Ops.BUFFER:
+      becomes = buf_ref.base.view(unwrap(k.st))
+    
+    if becomes: becomes_map[k] = becomes
 
   # confirm everything was scheduled correctly
   allocated_bufs = set(realizes)
   backrefed_bufs = set([x.base for x in becomes_map.values()])
-  #if len(zombies:=(allocated_bufs - backrefed_bufs)) != 0: raise AssertionError(f"have zombie bufs leftover {zombies}")
+  if len(zombies:=(allocated_bufs - backrefed_bufs)) != 0:
+    raise AssertionError(f"have zombie bufs leftover {zombies}")
   return schedule, var_vals, becomes_map
