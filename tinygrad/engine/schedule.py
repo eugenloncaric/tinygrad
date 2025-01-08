@@ -95,6 +95,11 @@ sym = symbolic_simple+PatternMatcher([
   # COPY to the same device collapses unless clone
   (UPat(Ops.COPY, name="root", src=(UPat(), UPat.var("x"))), lambda root,x: None if root.arg is True or root.device != x.device else x),
 
+  # cast folding
+  # CAST(VIEW(x)) -> VIEW(CAST(x)) maybe
+  (UPat(Ops.CAST, name="root", src=(UPat(Ops.VIEW, name="view", src=(UPat.var("x"),),))),
+   lambda x,root,view: x.cast(root.dtype).view(view.st) if root.dtype.itemsize <= x.dtype.itemsize else None),
+
   # detach is a noop here
   (UPat(Ops.DETACH, src=(UPat.var("x"))), lambda x:x),
 ])
