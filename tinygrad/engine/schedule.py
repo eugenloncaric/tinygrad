@@ -3,7 +3,7 @@ from tinygrad.dtype import ImageDType, dtypes
 from tinygrad.ops import UOp, Ops, GroupOp, Variable, PatternMatcher, UPat, type_verify, graph_rewrite, track_rewrites, identity_element, buffers
 from tinygrad.ops import merge_views, symbolic_simple, view_left, graph_rewrite_map
 from tinygrad.device import Buffer
-from tinygrad.helpers import Metadata, DEBUG, all_int, unwrap, prod, dedup
+from tinygrad.helpers import Metadata, DEBUG, all_int, unwrap, prod, dedup, Context
 from tinygrad.shape.shapetracker import ShapeTracker
 
 BUF_LIMIT = {"METAL":32}
@@ -200,7 +200,13 @@ debufferize = PatternMatcher([
   (UPat(Ops.SINK, name="sink"), add_stores),
 ])
 
+def apply_swizzle(u:UOp) -> UOp:
+  with Context(TRACK_MATCH_STATS=0): return graph_rewrite(u, view_left)
+
 view_right = PatternMatcher([
+  # STORE(.., ASSIGN(VIEW(BUFFER), new_val)) -> STORE(.., new_val).view()
+  (UPat(Ops.STORE, src=(UPat.var("b"), UPat.var("st"), UPat.assign(UPat.var("target"), UPat.var("val")))),
+   lambda b,target,st,val: apply_swizzle(UOp.store(b, st, val).view(target.st))),
 ])
 
 to_si = PatternMatcher([
@@ -229,7 +235,7 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
   var_vals: dict[Variable, int] = {}
   for k,v in realizes.items():
     ast = graph_rewrite(v.sink(), debufferize+view_left+remove_movement_ops, bufs:=[k])
-    schedule.append(ScheduleItem(graph_rewrite(ast, unbind_vars+to_si, var_vals), tuple(b.buffer for b in bufs), ()))
+    schedule.append(ScheduleItem(graph_rewrite(graph_rewrite(ast, view_right), unbind_vars+to_si, var_vals), tuple(b.buffer for b in bufs), ()))
     for b in bufs: b.buffer.ref(1)
 
   # update tensor refs
