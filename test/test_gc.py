@@ -66,6 +66,19 @@ class TestGC(unittest.TestCase):
     del y
     self.assertEqual(bufs_allocated()-init, 0)
 
+  def test_schedule_gc_views(self):
+    init = bufs_allocated()
+    x = Tensor.ones(4, 1).contiguous().realize()
+    y = x.expand(4, 4)+Tensor.full((4, 4), 3.).contiguous()
+    ys = y.schedule()
+    del x
+    run_schedule(ys)
+    np.testing.assert_equal(y.numpy(), np.full((4,4), 4))
+    print([x for x in gc.get_objects() if isinstance(x, Buffer)])
+    self.assertEqual(bufs_allocated()-init, 1)
+    del y
+    self.assertEqual(bufs_allocated()-init, 0)
+
   def test_toposort_blocks_gc(self):
     init = bufs_allocated()
     x = Tensor.ones(4,4).contiguous().realize()+1
