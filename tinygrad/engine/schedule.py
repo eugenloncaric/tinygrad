@@ -82,6 +82,13 @@ sym = symbolic_simple+PatternMatcher([
    lambda root: root.const_like(identity_element(root.arg[0], root.dtype)) if root.size != 0 else None),
   (UPat(Ops.REDUCE_AXIS, name="root", src=(UPat(Ops.CONST, name="x"),)), collapse_const_reduce),
 
+  # contiguous folding
+  # double CONTIGUOUS is just self
+  (UPat(Ops.CONTIGUOUS, src=(UPat({Ops.CONTIGUOUS, Ops.BUFFER}, name="x"),)), lambda x: x),
+  # CONTIGUOUS(VIEW(x)) -> VIEW(CONTIGUOUS(x)) if the VIEW allows for it
+  (UPat(Ops.CONTIGUOUS, src=(UPat(Ops.VIEW, name="st", src=(UPat(set(Ops)-{Ops.CONST}, name="x"),)),)),
+   lambda x,st: x.contiguous().view(st.st) if st.st.contiguous and st.size == x.size else None),
+
   # copy folding
   (UPat(Ops.COPY, src=(UPat(), UPat.cvar("x"),)), lambda x:x),
 
