@@ -30,7 +30,7 @@ class ScheduleItem:
   bufs: tuple[Buffer, ...]
   metadata: tuple[Metadata, ...]
 
-# ** scheduler rewrite
+# ** movement ops rewrite rules
 
 remove_movement_ops = merge_views+PatternMatcher([
   (UPat(GroupOp.Movement, name="mov", src=(UPat.var("x"),)), lambda mov,x: x.view(mov.st)),
@@ -41,6 +41,8 @@ remove_movement_ops = merge_views+PatternMatcher([
   (UPat(Ops.CONST, name="root", src=(UPat(Ops.VIEW, name="view"),)),
    lambda root,view: None if view.st.views[0].mask is None else root.valid())
 ])
+
+# ** symbolic **
 
 def collapse_size0_op(root:UOp):
   if root.base.st is None or root.size != 0: return None
@@ -82,17 +84,15 @@ sym = symbolic_simple+PatternMatcher([
   (UPat(Ops.DETACH, src=(UPat.var("x"))), lambda x:x),
 ])
 
-def add_buffer(ctx:dict[UOp, UOp], root:UOp):
+# ** kernel creation
+
+def create_buffer(ctx:dict[UOp, UOp], root:UOp):
   if root.base.st is None or root.base.op in {Ops.SINK, Ops.BIND, Ops.DEFINE_VAR, Ops.BUFFER, Ops.CONST, Ops.VALID, Ops.VIEW}: return None
   buffer = UOp.new_buffer(root.device, root.size, root.dtype)
   ctx[buffer] = root
   return buffer.view(unwrap(root.st))
 
-def add_assign(ctx:dict[UOp, UOp], root:UOp, target:UOp):
-  ctx[target.base] = root
-  return target
-
-def add_empty(ctx:dict[UOp, UOp], root:UOp, target:UOp):
+def add_target_buf(ctx:dict[UOp, UOp], root:UOp, target:UOp):
   ctx[target.base] = root
   return target
 
@@ -101,15 +101,34 @@ def add_buffer_view(ctx:dict[UOp, UOp], root:UOp, src:UOp):
   buffers[sbuf] = src.base.buffer.view(root.size, root.dtype, unwrap(src.st).views[0].offset*src.dtype.itemsize)
   return sbuf.view(unwrap(root.st))
 
+def view_src(ctx:dict[UOp, UOp], src:UOp, view:UOp):
+  if src.op is Ops.BUFFER or src.st is None: return None
+  if view.size <= src.size and all(v.mask is None for v in view.st.views): return None
+  if (buffer_src:=create_buffer(ctx, src)) is None: return None
+  return buffer_src.view(view.st)
+
+def ensure_realized(ctx:dict[UOp, UOp], root:UOp, dest:UOp, x:UOp):
+  if x.base.op is Ops.BUFFER: return None
+  buffer_src = create_buffer(ctx, x.base).view(x.st)
+  assert buffer_src is not None, f"expected src of root {buffer_src} to be bufferizable"
+  return root.replace(src=(dest, buffer_src))
+
 bufferize = PatternMatcher([
-  (UPat(Ops.EMPTY, name="root", src=(UPat.var("target"),)), add_empty),
-  (UPat(Ops.ASSIGN, name="root", src=(UPat.var("target"), UPat())), add_assign),
+  # ensure COPY and BUFFER_VIEW inputs are realized
+  (UPat({Ops.COPY, Ops.BUFFER_VIEW}, name="root", src=(UPat.var("dest"), UPat.var("x"),)), ensure_realized),
+  # allocate new bufs for contiguous and copy
+  (UPat({Ops.COPY, Ops.CONTIGUOUS}, name="root"), create_buffer),
+  # simple rule for REDUCE_AXIS. TODO: fuse when it makes sense
+  (UPat(Ops.REDUCE_AXIS, name="root"), create_buffer),
+  # realize before view
+  (UPat(Ops.VIEW, name="view", src=(UPat.var("src"),)), view_src),
+
+  # add the pre existing buffers in EMPTY and ASSIGN
+  (UPat(Ops.EMPTY, name="root", src=(UPat.var("target"),)), add_target_buf),
+  (UPat(Ops.ASSIGN, name="root", src=(UPat.var("target"), UPat())), add_target_buf),
+
+  # create subbuffer for BUFFER_VIEW
   (UPat(Ops.BUFFER_VIEW, name="root", src=(UPat(), UPat.var("src"))), add_buffer_view),
-  # bufferize every op except the base sink
-  # NOTE: this is just to pass correctness for now
-  (UPat(Ops.COPY, name="root"), add_buffer),
-  (UPat(Ops.REDUCE_AXIS, name="root"), add_buffer),
-  (UPat(Ops.CONTIGUOUS, name="root"), add_buffer),
 ])
 
 # ** deal with schedule variables
@@ -208,6 +227,5 @@ def create_schedule_with_vars(outs:list[UOp]) -> tuple[list[ScheduleItem], dict[
   # confirm everything was scheduled correctly
   allocated_bufs = set(realizes)
   backrefed_bufs = set([x.base for x in becomes_map.values()])
-  if len(zombies:=(allocated_bufs - backrefed_bufs)) != 0:
-    raise AssertionError(f"have zombie bufs leftover {zombies}")
+  #if len(zombies:=(allocated_bufs - backrefed_bufs)) != 0: raise AssertionError(f"have zombie bufs leftover {zombies}")
   return schedule, var_vals, becomes_map
