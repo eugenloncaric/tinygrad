@@ -2,7 +2,10 @@ import unittest
 from tinygrad import Tensor
 from tinygrad.ops import UPat, Ops, UOp
 
-realized_pattern = UPat(Ops.VIEW, src=(UPat(Ops.BUFFER),))
+# NOTE: BUFFER is a flat piece of memory, tensors with a contiguous output st of shape=(N,) and stride=(1,) just use this BUFFER uop
+realized_pattern = UPat(Ops.BUFFER)
+# otherwise realized tensors change their representation to VIEW(flat_buf)
+realized_view_pattern = UPat(Ops.VIEW, src=(UPat(Ops.BUFFER),))
 const_pattern = UPat(Ops.CONST, src=(UPat(Ops.VIEW, src=(UPat(Ops.DEVICE),),)))
 def is_pattern_uop(u:UOp, pat:UPat): assert pat.match(u, {}), f"{u}\nis not\n{pat}"
 def is_pattern(ten:Tensor, pat:UPat): is_pattern_uop(ten.lazydata, pat)
@@ -19,7 +22,7 @@ class TestTensorMutates(unittest.TestCase):
     self.assertIsNot(pa, a.lazydata)
     self.assertIsNot(pb, b.lazydata)
     self.assertIsNot(pr, ret.lazydata)
-    for t in [a,b,ret]: is_pattern(t, realized_pattern)
+    for t in [a,b,ret]: is_pattern(t, realized_view_pattern)
 
   def test_reshape_is_same_parent(self):
     a = Tensor([1,2,3])
@@ -43,14 +46,14 @@ class TestTensorUopRepresentation(unittest.TestCase):
   def test_realized(self):
     a = Tensor([1.,2,3]).realize()
     print(a.lazydata)
-    is_pattern(a, realized_pattern)
+    is_pattern(a, realized_view_pattern)
 
   def test_add_realized(self):
     a = Tensor([1.,2,3]).realize()
     b = Tensor([4.,5,6]).realize()
     c = a+b
     print(c.lazydata)
-    is_pattern(c, UPat(Ops.ADD, src=(realized_pattern, realized_pattern)))
+    is_pattern(c, UPat(Ops.ADD, src=(realized_view_pattern, realized_view_pattern)))
 
   def test_const_pattern(self):
     a = Tensor(1)
@@ -107,7 +110,7 @@ class TestTensorUopRepresentation(unittest.TestCase):
     a = Tensor([1.,2,3]).realize()
     c = a.to("TEST")   # NOTE: this isn't checked
     print(c.lazydata)
-    is_pattern(c, UPat(Ops.COPY, src=(UPat(Ops.DEVICE), realized_pattern,)))
+    is_pattern(c, UPat(Ops.COPY, src=(UPat(Ops.DEVICE), realized_pattern,)).view()),
 
 if __name__ == '__main__':
   unittest.main()
