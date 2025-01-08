@@ -116,7 +116,7 @@ def add_target_buf(ctx:dict[UOp, UOp], root:UOp, target:UOp):
 
 def view_src(ctx:dict[UOp, UOp], src:UOp, view:UOp):
   if src.op is Ops.BUFFER or src.st is None: return None
-  if view.size <= src.size and all(v.mask is None for v in view.st.views): return None
+  if view.size <= src.size and all(v.mask is None for v in unwrap(view.st).views): return None
   if (buffer_src:=create_buffer(ctx, src)) is None: return None
   return buffer_src.view(view.st)
 
@@ -170,7 +170,7 @@ unbind_vars = PatternMatcher([
   (UPat(Ops.BIND, name="root"), unbind_var),
   # TODO: for some reason symbolic sts should keep existing on const reduce even if they are unmasked
   (UPat({Ops.CONST, Ops.DEFINE_VAR}, name="root", src=(UPat(),)), lambda root:root.replace(src=()) if all_int(root.shape) \
-      else UOp(Ops.VALID, dtypes.bool, (unwrap(root.st).to_uop(),)).where(root.replace(src=()), 0)),
+      else UOp(Ops.VALID, dtypes.bool, (root.st.to_uop(),)).where(root.replace(src=()), 0)),
 ])
 
 # ** deal with ImageDType
