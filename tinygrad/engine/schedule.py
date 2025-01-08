@@ -43,16 +43,14 @@ remove_movement_ops = merge_views+PatternMatcher([
   # const is free to copy around, so this view just merges
   (UPat(Ops.VIEW, name="v2", src=(UPat(Ops.CONST, name="x", src=(UPat(Ops.VIEW, name="v1"),)),)), lambda x,v1,v2: x.replace(src=(v1.view(v2.st),))),
   # masked CONST becomes VALID, this structurally prevents future const folding
-  (UPat(Ops.CONST, name="root", src=(UPat(Ops.VIEW, name="view"),)),
-   lambda root,view: None if view.st.views[0].mask is None else root.valid())
+  (UPat(Ops.CONST, name="root", src=(UPat(Ops.VIEW, name="view"),)), lambda root,view: None if view.st.views[0].mask is None else root.valid())
 ])
 
 # ** symbolic **
 
 def collapse_size0_op(root:UOp):
   if root.base.st is None or root.size != 0: return None
-  if root.base.op is Ops.CONST and root.const_arg == 0: return None
-  return root.const_like(0)
+  return None if root.base.op is Ops.CONST and root.const_arg == 0 else root.const_like(0)
 
 def collapse_const_reduce(root:UOp, x:UOp):
   if not all_int(x.shape): return None
@@ -90,7 +88,12 @@ sym = symbolic_simple+PatternMatcher([
    lambda x,st: x.contiguous().view(st.st) if st.st.contiguous and st.size == x.size else None),
 
   # copy folding
+  # COPY(CONST) -> CONST
   (UPat(Ops.COPY, src=(UPat(), UPat.cvar("x"),)), lambda x:x),
+  # COPY(COPY(x)) -> COPY(x)
+  (UPat(Ops.COPY, name="root", src=(UPat.var("dest"), UPat(Ops.COPY, src=(UPat(), UPat.var("x"))))), lambda dest,root,x: root.replace(src=(dest, x))),
+  # COPY to the same device collapses unless clone
+  (UPat(Ops.COPY, name="root", src=(UPat(), UPat.var("x"))), lambda root,x: None if root.arg is True or root.device != x.device else x),
 
   # detach is a noop here
   (UPat(Ops.DETACH, src=(UPat.var("x"))), lambda x:x),
