@@ -99,6 +99,7 @@ def add_target_buf(ctx:dict[UOp, UOp], root:UOp, target:UOp):
 def add_buffer_view(ctx:dict[UOp, UOp], root:UOp, src:UOp):
   sbuf = UOp.new_buffer(root.device, root.size, root.dtype)
   buffers[sbuf] = src.base.buffer.view(root.size, root.dtype, unwrap(src.st).views[0].offset*src.dtype.itemsize)
+  ctx[sbuf] = root
   return sbuf.view(unwrap(root.st))
 
 def view_src(ctx:dict[UOp, UOp], src:UOp, view:UOp):
