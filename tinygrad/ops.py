@@ -442,9 +442,7 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
     # Tensor variable binding is BIND(VAR(VIEW(DEVICE)), var.const_like(val))
     if op is Ops.BIND:
       var, val = arg.unbind()
-      var = var.replace(src=(UOp(Ops.VIEW, dtypes.void, (UOp(Ops.DEVICE, arg=device),),
-                                 ShapeTracker.from_shape(())),)).reshape((1,)*len(shape)).expand(shape)
-      return var.bind(val)
+      return var.replace(src=(UOp(Ops.VIEW, dtypes.void, (UOp(Ops.DEVICE, arg=device),), ShapeTracker.from_shape(shape)),)).bind(val)
     # empty is EMPTY(VIEW(BUFFER))
     if op is Ops.EMPTY:
       return UOp(Ops.EMPTY, dtype, (UOp.new_buffer(device, (st:=ShapeTracker.from_shape(shape)).size, dtype).view(st),))
