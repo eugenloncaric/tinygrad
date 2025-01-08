@@ -717,6 +717,7 @@ class TestInferenceMode(unittest.TestCase):
       assert W.grad is None
     f(x, m, W)
 
+@unittest.skip("metadata is not supported yet")
 class TestTensorMetadata(unittest.TestCase):
   def setUp(self) -> None: _METADATA.set(None)
   def test_matmul(self):

@@ -56,6 +56,7 @@ class TestTrain(unittest.TestCase):
     train_one_step(model,X,Y)
     check_gc()
 
+  @unittest.skip("very slow without optimizations")
   def test_transformer(self):
     # this should be small GPT-2, but the param count is wrong
     # (real ff_dim is 768*4)

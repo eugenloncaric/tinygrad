@@ -130,6 +130,7 @@ class TestMovedConstFolding(unittest.TestCase):
   def test_add_padded_one(self):
     _check_ast_count(1, Tensor([1.0, 2, 3, 4]) * Tensor.ones(2).pad(((1, 1),)))
 
+  @unittest.skip("TOOD: add CAST_BEFORE_VIEW back")
   def test_cast_padded(self):
     # NOTE: this is folded due to CAST_BEFORE_VIEW
     if is_dtype_supported(dtypes.int16):

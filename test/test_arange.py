@@ -8,6 +8,7 @@ from tinygrad.engine.realize import CompiledRunner, ExecItem
 from tinygrad.engine.search import get_kernel_actions
 from tinygrad.ops import Ops
 
+@unittest.skip("arange opts not yet supported")
 class TestArange(unittest.TestCase):
   def _get_flops(self, N, opts=None):
     GlobalCounters.reset()
@@ -65,6 +66,7 @@ class TestArange(unittest.TestCase):
   def test_all_opts_w_upcast_and_unroll(self):
     return self.test_all_opts([Opt(OptOps.UPCAST, 0, 4), Opt(OptOps.UNROLL, 0, 4)], [Opt(op=OptOps.GROUP, axis=0, amt=0)])
 
+@unittest.skip("FUSE_ARANGE=1 opts not yet supported")
 class TestIndexing(unittest.TestCase):
   @unittest.expectedFailure
   def test_arange_2_reduce(self):

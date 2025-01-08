@@ -6,6 +6,10 @@ from tinygrad.device import Buffer
 from tinygrad.helpers import Metadata, DEBUG, all_int, unwrap, prod, dedup, Context
 from tinygrad.shape.shapetracker import ShapeTracker
 
+# TODO: why does test_openpilot_model still need this?
+import sys
+sys.setrecursionlimit(10000)
+
 BUF_LIMIT = {"METAL":32}
 
 # ** tensor uop spec
@@ -97,8 +101,8 @@ sym = symbolic_simple+PatternMatcher([
 
   # cast folding
   # CAST(VIEW(x)) -> VIEW(CAST(x)) maybe
-  (UPat(Ops.CAST, name="root", src=(UPat(Ops.VIEW, name="view", src=(UPat.var("x"),),))),
-   lambda x,root,view: x.cast(root.dtype).view(view.st) if root.dtype.itemsize <= x.dtype.itemsize else None),
+  #(UPat(Ops.CAST, name="root", src=(UPat(Ops.VIEW, name="view", src=(UPat.var("x"),),))),
+   #lambda x,root,view: x.cast(root.dtype).view(view.st) if root.dtype.itemsize <= x.dtype.itemsize else None),
 
   # detach is a noop here
   (UPat(Ops.DETACH, src=(UPat.var("x"))), lambda x:x),
